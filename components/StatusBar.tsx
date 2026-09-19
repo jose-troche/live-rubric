@@ -39,16 +39,12 @@ export function StatusBar({
     ? "dot dot--pending"
     : state.error
       ? "dot dot--down"
-      : state.degraded
-        ? "dot dot--fallback"
-        : state.provider
-          ? "dot dot--live"
-          : "dot";
+      : state.provider
+        ? "dot dot--live"
+        : "dot";
 
   const providerText = state.provider
-    ? state.degraded
-      ? `${state.provider.label} (fallback)`
-      : state.provider.label
+    ? state.provider.label
     : state.pending
       ? "Connecting…"
       : "No provider yet";

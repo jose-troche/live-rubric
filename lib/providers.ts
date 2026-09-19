@@ -8,20 +8,20 @@ import type { SystemOneResult } from "@typesafe-ai/sdk";
 import { RUBRIC_QUESTIONS, type RubricQuestions } from "./rubric";
 
 /**
- * Provider selection and failover.
+ * Provider configuration.
  *
- * The brief is "use the free Jev in the Vercel environment; fall back to OpenJev
- * when the free period ends or the service stops responding". That is cheap to
- * implement well here because Codiv implements the SAME wire API as TypeSafe —
- * so failover is a base-URL swap, not a second integration. The whole rubric,
- * the response parsing and the types are shared.
+ * OpenJev on Codiv is the only provider. Vercel AI Gateway used to sit in front
+ * of it as the primary, but the gateway will not service a request until the
+ * team has a credit card on file — it answers `GET /v1/models` happily and then
+ * returns 403 `customer_verification_required` on every actual evaluation, so
+ * "free credit" is not free to reach. Codiv's free tier needs no card.
  *
- * The parts that need actual care are (a) deciding which failures are worth
- * failing over for, and (b) not paying the dead provider's timeout on every
- * single keystroke pause. Both are handled below.
+ * There is therefore nothing to fail over TO, and the code says so rather than
+ * keeping a chain of one. What remains worth doing is not hammering a provider
+ * that just rejected us on every single keystroke pause: that is the breaker.
  */
 
-export type ProviderId = "vercel" | "typesafe" | "codiv" | "mock";
+export type ProviderId = "codiv";
 
 export interface ProviderSpec {
   readonly id: ProviderId;
@@ -30,13 +30,13 @@ export interface ProviderSpec {
   readonly note: string;
 }
 
-const PRIMARY_TIMEOUT_MS = 6_000;
-const FALLBACK_TIMEOUT_MS = 9_000;
+/* No fallback means no reason to cut the attempt short to leave time for one. */
+const REQUEST_TIMEOUT_MS = 9_000;
 
-/** How long to stop trying a provider after it fails, by reason. */
+/** How long to stop trying the provider after it fails, by reason. */
 const COOLDOWN_MS = {
-  /** Out of credit / key rejected: the free period is over. Don't keep asking. */
-  entitlement: 10 * 60_000,
+  /** Key rejected or out of credit. Real, but cheap to re-probe once it is fixed. */
+  entitlement: 60_000,
   /** Rate limited: transient but real; back off for a bit. */
   rateLimit: 30_000,
   /** Down, slow, or unreachable: retry soon, it may come back. */
@@ -59,125 +59,86 @@ function env(name: string): string | undefined {
   return value && value.trim() !== "" ? value.trim() : undefined;
 }
 
-/**
- * On Vercel the platform injects `VERCEL_OIDC_TOKEN` and AI Gateway accepts it
- * as a bearer token, so a deployment authenticates with no configuration at all.
- * An explicit `AI_GATEWAY_API_KEY` wins when present (and is what you use for a
- * local `next dev`).
- */
-function resolveAll(): ResolvedProvider[] {
-  const candidates: (ResolvedProvider | null)[] = [];
-
-  const gatewayKey = env("AI_GATEWAY_API_KEY") ?? env("VERCEL_OIDC_TOKEN");
-  candidates.push(
-    gatewayKey
-      ? {
-          id: "vercel",
-          label: "Jev · Vercel AI Gateway",
-          model: env("LIVE_RUBRIC_VERCEL_MODEL") ?? "typesafe-ai/jev",
-          note: "Free credit in the Vercel environment",
-          baseURL: env("AI_GATEWAY_BASE_URL") ?? "https://ai-gateway.vercel.sh/typesafe",
-          apiKey: gatewayKey,
-        }
-      : null,
-  );
-
-  const typesafeKey = env("TYPESAFE_API_KEY");
-  candidates.push(
-    typesafeKey
-      ? {
-          id: "typesafe",
-          label: "Jev · TypeSafe direct",
-          model: env("TYPESAFE_DEFAULT_MODEL") ?? "jev-latest",
-          note: "Direct api.typesafe.ai key",
-          baseURL: env("TYPESAFE_BASE_URL") ?? "https://api.typesafe.ai",
-          apiKey: typesafeKey,
-        }
-      : null,
-  );
-
-  const codivKey = env("CODIV_API_KEY") ?? env("OPENJEV_API_KEY");
-  candidates.push(
-    codivKey
-      ? {
-          id: "codiv",
-          label: "OpenJev · Codiv",
-          model: env("LIVE_RUBRIC_CODIV_MODEL") ?? "openjev-latest",
-          note: "Open-weights fallback",
-          baseURL: env("CODIV_BASE_URL") ?? "https://api.codiv.ai",
-          apiKey: codivKey,
-        }
-      : null,
-  );
-
-  const resolved = candidates.filter((c): c is ResolvedProvider => c !== null);
-
-  // An explicit preference reorders the chain rather than replacing it, so the
-  // fallback still exists when you pin a primary.
-  const preferred = env("LIVE_RUBRIC_PRIMARY");
-  if (preferred) {
-    resolved.sort((a, b) => Number(b.id === preferred) - Number(a.id === preferred));
-  }
-  return resolved;
+/** The configured provider, or null when there is no key to use. */
+function resolve(): ResolvedProvider | null {
+  const apiKey = env("CODIV_API_KEY") ?? env("OPENJEV_API_KEY");
+  if (!apiKey) return null;
+  return {
+    id: "codiv",
+    label: "OpenJev · Codiv",
+    model: env("LIVE_RUBRIC_CODIV_MODEL") ?? "openjev-latest",
+    note: "Free tier — no card required",
+    baseURL: env("CODIV_BASE_URL") ?? "https://api.codiv.ai",
+    apiKey,
+  };
 }
 
-/* Clients are cached per base URL: a warm Vercel function reuses the connection
-   pool instead of building a client per keystroke pause. */
-const clients = new Map<string, TypeSafeClient>();
+/* The client is cached: a warm Vercel function reuses the connection pool
+   instead of building a client per keystroke pause. */
+let cached: { key: string; client: TypeSafeClient } | null = null;
 
-function clientFor(p: ResolvedProvider, timeout: number): TypeSafeClient {
-  const cacheKey = `${p.baseURL}\u0000${timeout}`;
-  let client = clients.get(cacheKey);
-  if (!client) {
-    client = new TypeSafeClient({
-      apiKey: p.apiKey,
-      baseURL: p.baseURL,
-      defaultModel: p.model,
-      timeout,
-      // We fail over instead of retrying in place: a second attempt against a
-      // provider that just timed out costs more wall-clock than the next
-      // provider's first attempt, and this runs on a typing pause.
-      retry: { maxRetries: 0 },
-      logLevel: "warn",
-    });
-    clients.set(cacheKey, client);
+function clientFor(p: ResolvedProvider): TypeSafeClient {
+  const key = `${p.baseURL}\u0000${p.apiKey}\u0000${p.model}`;
+  if (cached?.key !== key) {
+    cached = {
+      key,
+      client: new TypeSafeClient({
+        apiKey: p.apiKey,
+        baseURL: p.baseURL,
+        defaultModel: p.model,
+        timeout: REQUEST_TIMEOUT_MS,
+        // One attempt. A retry against a provider that just timed out costs
+        // more wall-clock than it is worth when this runs on a typing pause.
+        retry: { maxRetries: 0 },
+        logLevel: "warn",
+      }),
+    };
   }
-  return client;
+  return cached.client;
 }
 
 /* ------------------------------------------------------------------------ */
 /* Circuit breaker                                                           */
 /* ------------------------------------------------------------------------ */
 
-/* Module scope, so it survives between invocations on a warm function. It is
-   per-instance rather than shared, which is the right trade here: the cost of a
-   cold instance re-learning that a provider is down is one request. */
-const openUntil = new Map<ProviderId, { until: number; kind: FailureKind }>();
-
-function isTripped(id: ProviderId): boolean {
-  const entry = openUntil.get(id);
-  if (!entry) return false;
-  if (Date.now() >= entry.until) {
-    openUntil.delete(id); // half-open: let the next request probe it
-    return false;
-  }
-  return true;
+interface OpenBreaker {
+  readonly until: number;
+  readonly kind: FailureKind;
+  /* The failure that opened the breaker. Kept because a skipped attempt is
+     otherwise unexplainable: "cooling down after entitlement" names the
+     category but not the cause, and the cause is the part you can act on. */
+  readonly reason: string;
 }
 
-function trip(id: ProviderId, kind: FailureKind) {
+/* Module scope, so it survives between invocations on a warm function. It is
+   per-instance rather than shared, which is the right trade here: the cost of a
+   cold instance re-learning that the provider is down is one request. */
+let breaker: OpenBreaker | null = null;
+
+/** The open breaker, or null when it is closed or has expired. */
+function openBreaker(): OpenBreaker | null {
+  if (!breaker) return null;
+  if (Date.now() >= breaker.until) {
+    breaker = null; // half-open: let the next request probe it
+    return null;
+  }
+  return breaker;
+}
+
+function trip(kind: FailureKind, reason: string) {
   if (kind === "fatal") return; // our bug, not theirs — don't blame the provider
-  openUntil.set(id, { until: Date.now() + COOLDOWN_MS[kind], kind });
+  breaker = { until: Date.now() + COOLDOWN_MS[kind], kind, reason };
 }
 
 /**
- * Decide whether another provider could plausibly do better.
+ * Classify a failure, which decides how long to stay away.
  *
- * A 400/422 means we built a bad request: the fallback would reject it too, so
- * failing over just doubles the latency before showing the same error.
+ * A 400/422 means we built a bad request: waiting will not fix it, and the
+ * provider is not the thing that is broken.
  */
 function classify(error: unknown): FailureKind {
   if (error instanceof APIError) {
-    if (error.status === 401 || error.status === 403 || error.status === 402) {
+    if (error.status === 401 || error.status === 402 || error.status === 403) {
       return "entitlement";
     }
     if (error.status === 429) return "rateLimit";
@@ -216,94 +177,88 @@ export interface Evaluation {
   readonly provider: ProviderSpec;
   readonly usage: { input_tokens: number; output_tokens: number };
   readonly latencyMs: number;
-  /** Everything tried before this succeeded — surfaced in the UI. */
+  /** What happened on the way here — surfaced in the UI. */
   readonly attempts: readonly Attempt[];
-  readonly degraded: boolean;
 }
 
 export class NoProviderError extends Error {
   constructor(readonly attempts: readonly Attempt[]) {
     super(
       attempts.length === 0
-        ? "No Jev provider is configured. Set AI_GATEWAY_API_KEY or CODIV_API_KEY."
-        : `Every provider failed: ${attempts.map((a) => `${a.label} (${a.reason})`).join("; ")}`,
+        ? "No Jev provider is configured. Set CODIV_API_KEY."
+        : `Evaluation failed: ${attempts.map((a) => `${a.label} (${a.reason})`).join("; ")}`,
     );
     this.name = "NoProviderError";
   }
 }
 
 /**
- * Evaluate `text` against the full rubric, walking the provider chain until one
- * answers. One HTTP request per provider attempt; all 15 questions ride along
- * inside it and are answered in parallel.
+ * Evaluate `text` against the full rubric. One HTTP request; all 15 questions
+ * ride along inside it and are answered in parallel.
  */
 export async function evaluate(
   text: string,
   signal?: AbortSignal,
 ): Promise<Evaluation> {
-  const chain = resolveAll();
-  const attempts: Attempt[] = [];
+  const provider = resolve();
+  if (!provider) throw new NoProviderError([]);
 
-  for (const [index, provider] of chain.entries()) {
-    const isPrimary = index === 0;
-
-    if (isTripped(provider.id)) {
-      attempts.push({
+  const open = openBreaker();
+  if (open) {
+    const secondsLeft = Math.ceil((open.until - Date.now()) / 1000);
+    throw new NoProviderError([
+      {
         provider: provider.id,
         label: provider.label,
         ok: false,
         skipped: true,
-        reason: `cooling down after ${openUntil.get(provider.id)?.kind}`,
-      });
-      continue;
-    }
-
-    const started = performance.now();
-    try {
-      const result = await clientFor(
-        provider,
-        isPrimary ? PRIMARY_TIMEOUT_MS : FALLBACK_TIMEOUT_MS,
-      ).systemOne(
-        { state: text, questions: RUBRIC_QUESTIONS, model: provider.model },
-        { signal },
-      );
-
-      attempts.push({ provider: provider.id, label: provider.label, ok: true });
-      return {
-        answers: result.answers,
-        provider: provider,
-        usage: result.usage,
-        latencyMs: Math.round(performance.now() - started),
-        attempts,
-        degraded: index > 0,
-      };
-    } catch (error) {
-      // The user typed again and we aborted this request on purpose. Not a
-      // provider failure — never trip the breaker for it.
-      if (error instanceof APIUserAbortError || signal?.aborted) throw error;
-
-      const kind = classify(error);
-      const reason = describe(error);
-      attempts.push({ provider: provider.id, label: provider.label, ok: false, reason });
-      trip(provider.id, kind);
-
-      if (kind === "fatal") break; // the next provider would reject it identically
-    }
+        reason: `${open.reason} (cooling down after ${open.kind}, ${secondsLeft}s left)`,
+      },
+    ]);
   }
 
-  throw new NoProviderError(attempts);
+  const started = performance.now();
+  try {
+    const result = await clientFor(provider).systemOne(
+      { state: text, questions: RUBRIC_QUESTIONS, model: provider.model },
+      { signal },
+    );
+
+    return {
+      answers: result.answers,
+      provider,
+      usage: result.usage,
+      latencyMs: Math.round(performance.now() - started),
+      attempts: [{ provider: provider.id, label: provider.label, ok: true }],
+    };
+  } catch (error) {
+    // The user typed again and we aborted this request on purpose. Not a
+    // provider failure — never trip the breaker for it.
+    if (error instanceof APIUserAbortError || signal?.aborted) throw error;
+
+    const reason = describe(error);
+    trip(classify(error), reason);
+    throw new NoProviderError([
+      { provider: provider.id, label: provider.label, ok: false, reason },
+    ]);
+  }
 }
 
-/** Provider chain and breaker state, for the status readout. */
+/** Provider and breaker state, for the status readout. */
 export function providerStatus() {
+  const provider = resolve();
   return {
-    chain: resolveAll().map((p) => ({
-      id: p.id,
-      label: p.label,
-      model: p.model,
-      note: p.note,
-      available: !isTripped(p.id),
-    })),
-    configured: resolveAll().length > 0,
+    chain: provider
+      ? [
+          {
+            id: provider.id,
+            label: provider.label,
+            model: provider.model,
+            note: provider.note,
+            available: openBreaker() === null,
+          },
+        ]
+      : [],
+    configured: provider !== null,
   };
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { SAMPLES } from "@/lib/samples";
 import { useLiveRubric } from "@/hooks/useLiveRubric";
 import { useTypewriter } from "@/hooks/useTypewriter";
@@ -13,46 +13,69 @@ export function LiveRubricApp() {
   const [mode, setMode] = useState<Mode>("demo");
   const [manualText, setManualText] = useState("");
   const [sampleIndex, setSampleIndex] = useState(0);
+  /* Bumped on every sample click so that re-picking the sample already on
+     screen replays it instead of doing nothing. */
+  const [runId, setRunId] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const sampleTexts = useMemo(() => SAMPLES.map((s) => s.text), []);
+  /* The opening sample is random, so the demo does not always lead with the
+     same document. It has to be picked after mount rather than during render:
+     a random value in the initial state would differ between the server and
+     client renders and trip hydration. */
+  useEffect(() => {
+    setSampleIndex(Math.floor(Math.random() * SAMPLES.length));
+  }, []);
 
-  const { visible, index, goTo } = useTypewriter({
-    texts: sampleTexts,
+  const active = SAMPLES[sampleIndex];
+
+  const { visible, done } = useTypewriter({
+    text: active.text,
     enabled: mode === "demo",
-    startIndex: sampleIndex,
-    onAdvance: setSampleIndex,
+    runId,
   });
 
   const text = mode === "demo" ? visible : manualText;
   const { state, reset, gptClassCostUsd } = useLiveRubric(text);
 
-  /* Switching to manual hands over whatever is on screen, so the rubric does
-     not blank out and you can start editing the sample you were watching. */
+  /* "Write your own" starts from a blank page. Handing over the sample that
+     happened to be on screen meant the first thing you did was select-all and
+     delete it. */
   const switchMode = useCallback(
     (next: Mode) => {
       if (next === mode) return;
-      if (next === "manual") setManualText(visible);
+      if (next === "manual") setManualText("");
       setMode(next);
     },
-    [mode, visible],
+    [mode],
   );
 
   useEffect(() => {
     if (mode === "manual") textareaRef.current?.focus();
   }, [mode]);
 
+  /* Clicking a sample is the only thing that starts a run. In manual mode it
+     loads the text to edit instead. */
   const pickSample = (i: number) => {
     setSampleIndex(i);
-    if (mode === "demo") {
-      goTo(i);
-    } else {
-      setManualText(SAMPLES[i].text);
-    }
+    setRunId((n) => n + 1);
+    if (mode === "manual") setManualText(SAMPLES[i].text);
   };
 
-  const active = SAMPLES[mode === "demo" ? index : sampleIndex];
   const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+
+  const status =
+    mode === "manual"
+      ? "Type anything. The rubric follows."
+      : done
+        ? `Finished “${active.name}” — these are the final scores.`
+        : `Typing “${active.name}” — ${active.blurb}`;
+
+  const instructions =
+    mode === "manual"
+      ? "Pick a sample below to load it into the editor, or just start writing."
+      : done
+        ? "Paused so you can read the scores. Pick any sample below to run it again."
+        : "The demo types one sample, then pauses on the final scores. Pick any sample below to switch to it.";
 
   return (
     <div className="shell">
@@ -82,12 +105,10 @@ export function LiveRubricApp() {
                 Write your own
               </button>
             </div>
-            <span className="card-sub">
-              {mode === "demo"
-                ? `Typing “${active.name}” — ${active.blurb}`
-                : "Type anything. The rubric follows."}
-            </span>
+            <span className="card-sub">{status}</span>
           </div>
+
+          <p className="demo-hint">{instructions}</p>
 
           <div className="samples" role="group" aria-label="Sample documents">
             {SAMPLES.map((sample, i) => (
@@ -95,7 +116,7 @@ export function LiveRubricApp() {
                 key={sample.id}
                 type="button"
                 className="sample-chip"
-                aria-pressed={i === (mode === "demo" ? index : sampleIndex)}
+                aria-pressed={i === sampleIndex}
                 onClick={() => pickSample(i)}
                 title={sample.blurb}
               >
@@ -108,10 +129,12 @@ export function LiveRubricApp() {
             {mode === "demo" ? (
               /* Read-only in demo mode: a textarea whose value is being
                  rewritten 45 times a second would fight anyone who clicked
-                 into it. The caret is drawn rather than real. */
+                 into it. The caret is drawn rather than real, and it goes away
+                 when the run ends — a blinking caret on a stopped demo reads
+                 as "still going". */
               <div className="readout" aria-live="off">
                 {visible}
-                <span className="caret" aria-hidden />
+                {done ? null : <span className="caret" aria-hidden />}
               </div>
             ) : (
               <textarea
@@ -129,6 +152,7 @@ export function LiveRubricApp() {
             <span>{words} words</span>
             <span>{text.length} characters</span>
             {state.pending ? <span>scoring…</span> : null}
+            {mode === "demo" && done ? <span>run complete</span> : null}
             {mode === "manual" && state.totalRequests > 0 ? (
               <button
                 type="button"
@@ -145,11 +169,9 @@ export function LiveRubricApp() {
         <section className="pane pane--rubric" aria-label="Rubric">
           {state.unconfigured ? (
             <div className="notice">
-              <strong>No Jev provider configured.</strong> Set{" "}
-              <code>AI_GATEWAY_API_KEY</code> for Jev on Vercel AI Gateway, or{" "}
-              <code>CODIV_API_KEY</code> for the OpenJev fallback, then reload. On a
-              Vercel deployment the gateway authenticates with the platform OIDC
-              token and needs no key at all.
+              <strong>No Jev provider configured.</strong> Set <code>CODIV_API_KEY</code>{" "}
+              to a key from <code>codiv.ai</code> and reload. The free tier needs no
+              card.
             </div>
           ) : null}
 
@@ -157,14 +179,6 @@ export function LiveRubricApp() {
             <div className="notice">
               <strong>Last evaluation failed.</strong> {state.error}
               {state.answers ? " Showing the previous reading." : ""}
-            </div>
-          ) : null}
-
-          {state.degraded ? (
-            <div className="notice">
-              <strong>Running on the fallback.</strong> The primary provider did not
-              answer, so these scores come from {state.provider?.label}. Numbers from a
-              different model are not directly comparable with the primary's.
             </div>
           ) : null}
 

@@ -17,7 +17,6 @@ export interface EvaluateSuccess {
   readonly latencyMs: number;
   /** USD for this single request. Input-priced; Jev bills no output tokens. */
   readonly costUsd: number;
-  readonly degraded: boolean;
   readonly attempts: readonly Attempt[];
 }
 

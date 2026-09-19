@@ -70,7 +70,6 @@ export async function POST(request: Request): Promise<Response> {
       usage: result.usage,
       latencyMs: result.latencyMs,
       costUsd: priceOf(result.usage),
-      degraded: result.degraded,
       attempts: result.attempts,
     };
     return NextResponse.json(payload, {

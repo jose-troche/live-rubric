@@ -19,7 +19,6 @@ export interface RubricState {
   readonly latencyMs: number | null;
   readonly inputTokens: number | null;
   readonly costUsd: number | null;
-  readonly degraded: boolean;
   readonly pending: boolean;
   readonly error: string | null;
   readonly unconfigured: boolean;
@@ -35,7 +34,6 @@ const INITIAL: RubricState = {
   latencyMs: null,
   inputTokens: null,
   costUsd: null,
-  degraded: false,
   pending: false,
   error: null,
   unconfigured: false,
@@ -117,7 +115,6 @@ export function useLiveRubric(text: string) {
         latencyMs: data.latencyMs,
         inputTokens: data.usage.input_tokens,
         costUsd: data.costUsd,
-        degraded: data.degraded,
         pending: false,
         error: null,
         unconfigured: false,

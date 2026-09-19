@@ -13,11 +13,16 @@ handle.
 
 ## What it does
 
-- **Demo mode** (default) types sample documents out on their own — a pull
-  request, a postmortem, two job postings, a support ticket, an email, a launch
-  post — pausing at sentence and paragraph ends. The bars move as the text
+- **Demo mode** (default) opens on a **random** sample document — a pull request,
+  a postmortem, two job postings, a support ticket, an email, a launch post — and
+  types it out, pausing at sentence and paragraph ends. The bars move as the text
   arrives.
-- **Write your own** hands the editor over to you, with the same live scoring.
+- **The run stops when the document is finished**, and the demo stays there so
+  the final scores can actually be read. It does not rotate on to the next sample
+  by itself. Clicking any sample starts a fresh run of that document — including
+  the one already on screen, which replays it.
+- **Write your own** hands the editor over to you with a **blank** page and the
+  same live scoring. Clicking a sample in this mode loads its text to edit.
 - Every dimension is drawn as a compact chart, and all fifteen fit on one screen.
 
 ## The three question types
@@ -35,62 +40,55 @@ All fifteen live in [`lib/rubric.ts`](lib/rubric.ts) as one object, sent as one
 `systemOne` call. A module-load assertion fails the build if the question set and
 the card metadata ever drift apart.
 
-## Providers and failover
+## Provider
 
-The app uses **Jev through Vercel AI Gateway** by default and falls back to
-**OpenJev on Codiv** when the gateway stops answering. This is cheap to do well
-because Codiv implements the *same wire API* as TypeSafe — failover is a base-URL
-swap, not a second integration, and the rubric, parsing and types are shared.
+The app runs on **OpenJev via Codiv**, which implements the same wire API as
+TypeSafe, so the rubric, the parsing and the types are all shared with Jev
+proper.
 
-| Order | Provider | Base URL | Model | Credential |
-|---|---|---|---|---|
-| 1 | Jev · Vercel AI Gateway | `https://ai-gateway.vercel.sh/typesafe` | `typesafe-ai/jev` | `AI_GATEWAY_API_KEY`, or the platform's `VERCEL_OIDC_TOKEN` |
-| 2 | Jev · TypeSafe direct | `https://api.typesafe.ai` | `jev-latest` | `TYPESAFE_API_KEY` (only if set) |
-| 3 | OpenJev · Codiv | `https://api.codiv.ai` | `openjev-latest` | `CODIV_API_KEY` |
+| Provider | Base URL | Model | Credential |
+|---|---|---|---|
+| OpenJev · Codiv | `https://api.codiv.ai` | `openjev-latest` | `CODIV_API_KEY` |
 
-Two details in [`lib/providers.ts`](lib/providers.ts) matter more than the
-fallback itself:
+Vercel AI Gateway used to sit in front of this as the primary. It was removed
+because the gateway will not service a request without a credit card on file: it
+answers `GET /v1/models` normally and then returns `403
+customer_verification_required` on every actual evaluation, so its "free credit"
+cannot be reached without a card. Codiv's free tier is 100M input tokens and
+needs none.
 
-**Not every failure is worth failing over for.** A 401, 403 or 402 means the free
-period ended or the key was rejected; a 429 or 5xx means try someone else; a
-timeout means the service is not responding. But a **400 or 422 means we built a
-bad request** — the fallback would reject it identically, so failing over just
-doubles the latency before showing the same error. Those stop the chain.
+Two details in [`lib/providers.ts`](lib/providers.ts) survive that removal:
+
+**Failures are classified, not merely counted.** A 401, 402 or 403 means the key
+was rejected or the credit ran out; a 429 or 5xx means try again shortly; a
+timeout means the service is not responding. A **400 or 422 means we built a bad
+request** — waiting will not fix it and the provider is not what is broken, so it
+does not count against the provider at all.
 
 **A dead provider must not be retried on every keystroke.** A circuit breaker
-holds a failed provider open for 10 minutes on an entitlement failure, 30 seconds
-on a rate limit, and 15 seconds when it is simply unreachable. Measured against a
-hung primary: the first request pays the 6s timeout once, and every request after
-it is served by the fallback in ~20ms instead of stalling for another 6 seconds.
-
-The status bar shows which provider answered, and a banner appears when a reading
-came from the fallback — scores from a different model are not directly
-comparable, so the UI says so rather than quietly swapping them in.
+holds it open for 60 seconds after a rejected key, 30 seconds on a rate limit and
+15 seconds when it is simply unreachable, so a typing pause costs ~1ms instead of
+a 9s timeout while the provider is down. The breaker records *why* it opened, and
+the error surfaced in the UI repeats that original cause along with the time
+left — "cooling down after entitlement" names a category, but the 403 body
+underneath it is the part you can act on.
 
 ## Running it
 
 ```sh
 npm install
-cp .env.example .env.local     # add AI_GATEWAY_API_KEY or CODIV_API_KEY
+cp .env.example .env.local     # add CODIV_API_KEY
 npm run dev
 ```
 
-You need at least one credential. With none, the app runs and tells you what to
-set rather than pretending to score.
-
-- **Vercel AI Gateway key** — any Vercel account, no waitlist. Create a `vck_…`
-  key in the AI Gateway dashboard.
-- **Codiv key** — a `sk-codiv-…` key from [codiv.ai](https://codiv.ai/); the free
-  tier is 100M input tokens with no card.
-
-Locally you can also run `vercel env pull` to get an OIDC token instead of a key.
+You need a `sk-codiv-…` key from [codiv.ai](https://codiv.ai/) — the free tier is
+100M input tokens and takes no card. Without it the app still runs and tells you
+what to set rather than pretending to score.
 
 ## Deploying to Vercel
 
-Zero configuration on a Hobby project: push the repo, import it, deploy. The
-gateway authenticates with the OIDC token Vercel injects, so **the primary
-provider needs no environment variable at all**. Add `CODIV_API_KEY` in project
-settings to arm the fallback.
+Push the repo, import it, deploy, and set `CODIV_API_KEY` in project settings.
+That is the only variable the app needs.
 
 The API route runs on the Node runtime (`app/api/evaluate/route.ts`) because the
 key must never reach the browser — the TypeSafe SDK refuses browser use unless
@@ -123,12 +121,12 @@ under 3:1 against the surface, so every card carries a visible numeric label.
 
 ```
 app/api/evaluate/route.ts   HTTP boundary: validation, pricing, error mapping
-lib/providers.ts            provider chain, failure classification, breaker
+lib/providers.ts            provider config, failure classification, breaker
 lib/rubric.ts               the 15 questions + card metadata (single source)
 lib/samples.ts              demo documents
 lib/wire.ts                 shared client/server types and pricing
 hooks/useLiveRubric.ts      debounce, abort, stale-drop, session totals
-hooks/useTypewriter.ts      demo typing with pauses at sentence ends
+hooks/useTypewriter.ts      demo typing with pauses at sentence ends, stops at the end
 components/Charts.tsx       the three chart forms
 ```
 
