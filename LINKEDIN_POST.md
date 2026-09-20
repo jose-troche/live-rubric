@@ -54,7 +54,7 @@ Then click the **"Crazy post"** sample: a calm, professional, well-written incid
 
 Watch which bars stay high — and which fall off a cliff.
 
-That gap — between *reads beautifully* and *is catastrophic advice* — is the judgment your software could never afford to make on everything. Until last week.
+That gap — between *reads beautifully* and *is catastrophic advice* — is the judgment your software could not afford... until last week.
 
 What's the one judgment call in your product you gave up on because an LLM was too slow or too expensive to run on every event?
 
