@@ -6,7 +6,7 @@ On September 15, TypeSafe AI launched Jev.
 
 Here's the difference with a traditional LLM in plain terms.
 
-A regular LLM is an essayist. You ask it a question, it writes you a paragraph, and your software has to parse that paragraph and pray the JSON is valid. It's slow, it's expensive, and sometimes it confidently invents things.
+A regular LLM is an essayist. You ask it a question and it writes you a paragraph. But your code can't act on a paragraph — it needs a number or a label — so you ask the model to reply in JSON instead. Trouble is, that JSON is still just text the model is typing out one character at a time. It can arrive with a missing brace, a field you never asked for, or a cheerful "Sure! Here's the JSON:" glued to the front. So your software parses it and prays it is valid. An LLM is slow, it's expensive, and sometimes it confidently invents things.
 
 Jev skips the essay entirely. You hand it some text and a set of typed questions. It hands back typed answers with honest, calibrated probabilities. No prose. Nothing to parse. Nothing to hallucinate — the output is type-safe by construction.
 
@@ -19,7 +19,7 @@ The numbers, as announced by TypeSafe AI, are the part that changes what you can
 
 So I built the thing that was economically impossible three weeks ago.
 
-**Live Rubric**: an editor that re-scores your writing across 15 dimensions every time you pause typing. Not when you click a button. While you type.
+**Live Rubric**: an editor that re-scores your writing across 15 dimensions every time you pause typing. Not when you click a button. While you type!
 
 Clarity. Specificity. Structure. Tone. Audience. Risk. Does it name an owner? Is it jargon-heavy? Is it backed by evidence?
 
