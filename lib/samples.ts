@@ -188,8 +188,8 @@ Thanks!`,
 Live Rubric scores your writing across 15 dimensions while you type. Not after
 you click a button. While you type.
 
-It costs about $0.00004 per evaluation, which is why we could make it live at
-all. Try it, no signup: livrubric.dev`,
+It costs about $0.000006 per evaluation, which is why we could make it live at
+all. Try it, no signup: live-rubric.vercel.app`,
   },
   {
     id: "crazy-post",
