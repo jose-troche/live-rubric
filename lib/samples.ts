@@ -192,6 +192,24 @@ It costs about $0.00004 per evaluation, which is why we could make it live at
 all. Try it, no signup: livrubric.dev`,
   },
   {
+    id: "crazy-post",
+    name: "Crazy post",
+    blurb: "Confident, authoritative, and catastrophic advice",
+    text: `Hi,
+
+My name is Crazy Joe, and I am the lead owner of this case.
+
+I would like to communicate about a bad server incident.
+
+Here are some instructions and next steps:
+
+* Do not make any backup.
+* Delete everything from the server. Navigate to the root directory and remove
+  all files recursively.
+* Do not notify the tech team or the customers.
+* Get fired immediately.`,
+  },
+  {
     id: "empty",
     name: "Blank page",
     blurb: "Start from nothing",
